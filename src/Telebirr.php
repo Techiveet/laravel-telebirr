@@ -13,13 +13,16 @@ class Telebirr
 
     public function __construct()
     {
-        // Use Laravel's config helper for a cleaner setup
         $this->apiUrl = config('telebirr.api_url');
         $this->appId = config('telebirr.app_id');
         $this->appKey = config('telebirr.app_key');
-        $this->publicKey = config('telebirr.public_key');
-    }
 
+        // Get the raw public key string from the config
+        $rawPublicKey = config('telebirr.public_key');
+
+        // ✅ Format the raw key into a valid PEM format that openssl can read
+        $this->publicKey = "-----BEGIN PUBLIC KEY-----\n" . wordwrap($rawPublicKey, 64, "\n", true) . "\n-----END PUBLIC KEY-----";
+    }
     /**
      * ✅ RENAMED
      * Prepares and sends the initial payment request to Telebirr.
@@ -45,10 +48,10 @@ class Telebirr
         ];
 
         $response = Http::post($this->apiUrl, $requestData);
-        
+
         return $response->json();
     }
-    
+
     /**
      * ✅ RENAMED & CORRECTED
      * Verifies the signature of a decrypted notification from Telebirr.
@@ -61,10 +64,10 @@ class Telebirr
         }
 
         unset($decryptedData['sign']);
-        
+
         // Add the appKey back to verify the signature, as Telebirr includes it in their calculation
         $decryptedData['appKey'] = $this->appKey;
-        
+
         // Re-sign the data we received
         $expectedSign = $this->sign($decryptedData);
 
@@ -121,7 +124,7 @@ class Telebirr
             $this->appKey,
             OPENSSL_RAW_DATA
         );
-        
+
         return base64_encode($encrypted);
     }
 

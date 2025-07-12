@@ -5,9 +5,7 @@ namespace Techive\Telebirr\Facades;
 use Illuminate\Support\Facades\Facade;
 
 /**
- * @method static array sendRequest(array $data)
- * @method static array|null decrypt(string $encryptedData)
- * @method static bool verify(array $decryptedData)
+ * @method static array createPayment(array $data)
  *
  * @see \Techive\Telebirr\Telebirr
  */

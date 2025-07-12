@@ -2,118 +2,137 @@
 
 namespace Techive\Telebirr;
 
-use GuzzleHttp\Client;
-use GuzzleHttp\Exception\GuzzleException;
+use Illuminate\Support\Facades\Http;
 
 class Telebirr
 {
-    protected array $config;
-    protected Client $client;
+    protected string $apiUrl;
+    protected string $appId;
+    protected string $appKey;
+    protected string $publicKey;
 
-    public function __construct(array $config)
+    public function __construct()
     {
-        $this->config = $config;
-        $this->client = new Client(['base_uri' => $this->config['api_url']]);
+        // Use Laravel's config helper for a cleaner setup
+        $this->apiUrl = config('telebirr.api_url');
+        $this->appId = config('telebirr.app_id');
+        $this->appKey = config('telebirr.app_key');
+        $this->publicKey = config('telebirr.public_key');
     }
 
     /**
-     * Create a payment request and get the redirect URL.
-     *
-     * @param float $amount
-     * @param string $nonce
-     * @param string $outTradeNo
-     * @param string $subject
-     * @return array
-     * @throws GuzzleException
+     * ✅ RENAMED
+     * Prepares and sends the initial payment request to Telebirr.
      */
-    public function sendPaymentRequest(float $amount, string $nonce, string $outTradeNo, string $subject): array
+    public function sendRequest(array $data): array
     {
-        $payload = $this->preparePayload($amount, $nonce, $outTradeNo, $subject);
-        $encryptedPayload = $this->encrypt($payload);
-        $signature = $this->sign($payload);
+        // 1. Prepare the full payload, including the appKey needed for signing
+        $payloadWithKey = $this->preparePayload($data);
 
+        // 2. Create the signature from the payload that includes the appKey
+        $signature = $this->sign($payloadWithKey);
+
+        // 3. Remove the appKey before encrypting the payload for the 'ussd' field
+        $payloadForEncryption = $payloadWithKey;
+        unset($payloadForEncryption['appKey']);
+        $encryptedUssd = $this->encrypt($payloadForEncryption);
+
+        // 4. Build the final request data
         $requestData = [
-            'appid' => $this->config['app_id'],
+            'appid' => $this->appId,
             'sign' => $signature,
-            'ussd' => $encryptedPayload,
+            'ussd' => $encryptedUssd,
         ];
 
-        $response = $this->client->post('', ['json' => $requestData]);
+        $response = Http::post($this->apiUrl, $requestData);
         
-        return json_decode($response->getBody()->getContents(), true);
+        return $response->json();
     }
     
     /**
-     * Verify the signature of a notification from Telebirr.
-     *
-     * @param array $data The notification data.
-     * @return bool
+     * ✅ RENAMED & CORRECTED
+     * Verifies the signature of a decrypted notification from Telebirr.
      */
-    public function verifyNotification(array $data): bool
+    public function verify(array $decryptedData): bool
     {
-        if (!isset($data['sign'])) {
+        $receivedSign = $decryptedData['sign'] ?? '';
+        if (empty($receivedSign)) {
             return false;
         }
 
-        $signature = $data['sign'];
-        unset($data['sign']);
+        unset($decryptedData['sign']);
         
-        // Per Telebirr docs, sort keys alphabetically to create the string to sign
-        ksort($data);
-
-        $stringToSign = '';
-        foreach ($data as $key => $value) {
-            if ($value !== '' && !is_null($value)) {
-                $stringToSign .= $key . '=' . $value . '&';
-            }
-        }
-        $stringToSign = rtrim($stringToSign, '&');
-
-        $publicKey = "-----BEGIN PUBLIC KEY-----\n" . wordwrap($this->config['public_key'], 64, "\n", true) . "\n-----END PUBLIC KEY-----";
-        $key = openssl_get_publickey($publicKey);
+        // Add the appKey back to verify the signature, as Telebirr includes it in their calculation
+        $decryptedData['appKey'] = $this->appKey;
         
-        return openssl_verify($stringToSign, base64_decode($signature), $key, OPENSSL_ALGO_SHA256) === 1;
+        // Re-sign the data we received
+        $expectedSign = $this->sign($decryptedData);
+
+        return $receivedSign === $expectedSign;
     }
 
-
-    private function preparePayload(float $amount, string $nonce, string $outTradeNo, string $subject): array
+    /**
+     * Decrypts incoming webhook data from Telebirr.
+     */
+    public function decrypt(string $encryptedData): ?array
     {
-        return [
-            'appId' => $this->config['app_id'],
-            'appKey' => $this->config['app_key'],
-            'nonce' => $nonce,
-            'notifyUrl' => $this->config['notify_url'],
-            'outTradeNo' => $outTradeNo,
-            'receiveName' => $this->config['receive_name'],
-            'returnUrl' => $this->config['return_url'],
-            'shortCode' => $this->config['short_code'],
-            'subject' => $subject,
-            'timeoutExpress' => $this->config['timeout_express'],
-            'timestamp' => round(microtime(true) * 1000),
-            'totalAmount' => number_format($amount, 2, '.', ''),
-        ];
+        $decrypted = '';
+        openssl_public_decrypt(
+            base64_decode($encryptedData),
+            $decrypted,
+            $this->publicKey,
+            OPENSSL_PKCS1_PADDING
+        );
+
+        return json_decode($decrypted, true);
     }
 
+    private function preparePayload(array $data): array
+    {
+        return array_merge([
+            'appId' => $this->appId,
+            'appKey' => $this->appKey, // The appKey is needed for signing
+            'nonce' => \Illuminate\Support\Str::random(16),
+            'timestamp' => round(microtime(true) * 1000),
+            'shortCode' => config('telebirr.short_code'),
+            'timeoutExpress' => "30",
+            'receiveName' => config('app.name', 'My Application'),
+        ], $data);
+    }
+
+    /**
+     * ✅ CORRECTED SIGNING METHOD
+     * Creates a signature by encrypting the payload string with the appKey.
+     */
     private function sign(array $data): string
     {
         ksort($data);
-        $stringToSign = '';
+        $stringToSign = "";
         foreach ($data as $key => $value) {
-             if ($value !== '' && !is_null($value)) {
-                $stringToSign .= $key . '=' . $value . '&';
+            if ($value !== "" && !is_null($value)) {
+                $stringToSign .= $key . "=" . $value . "&";
             }
         }
         $stringToSign = rtrim($stringToSign, '&');
 
-        return hash('sha256', $stringToSign);
+        $encrypted = openssl_encrypt(
+            $stringToSign,
+            'aes-128-ecb',
+            $this->appKey,
+            OPENSSL_RAW_DATA
+        );
+        
+        return base64_encode($encrypted);
     }
 
+    /**
+     * Encrypts the payload for the 'ussd' field using Telebirr's public key.
+     */
     private function encrypt(array $data): string
     {
         $jsonPayload = json_encode($data);
-        $publicKey = "-----BEGIN PUBLIC KEY-----\n" . wordwrap($this->config['public_key'], 64, "\n", true) . "\n-----END PUBLIC KEY-----";
         $encrypted = '';
-        openssl_public_encrypt($jsonPayload, $encrypted, $publicKey, OPENSSL_PKCS1_PADDING);
+        openssl_public_encrypt($jsonPayload, $encrypted, $this->publicKey, OPENSSL_PKCS1_PADDING);
 
         return base64_encode($encrypted);
     }
